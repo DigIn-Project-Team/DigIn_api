@@ -1,45 +1,96 @@
 import uuid
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Request
 from pydantic import BaseModel
 from starlette.responses import JSONResponse, Response
 from starlette.status import HTTP_204_NO_CONTENT
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2AuthorizationCodeBearer
+from fastapi.openapi.models import OAuthFlows, OAuthFlowAuthorizationCode
+from authlib.integrations.starlette_client import OAuth
+from fastapi.responses import RedirectResponse
 
-app = FastAPI() # cors 넣어주는게 좋음
+app = FastAPI()
 
+# CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = [
+    allow_origins=[
         "http://localhost",
         "http://localhost:8080",
-    ], # 허용할 도메인
-    allow_credentials=True, # 요청시 쿠키 지원 여부
-    allow_methods=["*"], # 허용할 메서드[get, post, put, fetch, delete 등등] (*[와일드카드] 쓰면 모두 쓸수 있음)
-    allow_headers=["*"], # 허용할 헤더 왼만해서는 다 허용해놓음(*[와일드카드]를 써놓음)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-class DiginGrass(BaseModel): # class, enum등은 다 CamelCase써는게 좋음
+# Load Google client ID and secret from environment variables
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
+# Google OAuth 설정
+google_oauth = OAuth()
+google_oauth.register(
+    name='google',
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    authorize_params=None,
+    authorize_kwargs=None,
+    token_url='https://accounts.google.com/o/oauth2/token',
+    token_params=None,
+    client_kwargs={'scope': 'openid profile email'},
+)
+
+# Google 로그인을 위한 보안 설정
+oauth2_scheme_google = OAuth2AuthorizationCodeBearer(
+    authorizationUrl='login',
+    tokenUrl='token',
+    flows=OAuthFlows(
+        authorizationCode=OAuthFlowAuthorizationCode(
+            authorizationUrl='login',
+            tokenUrl='token',
+        )
+    )
+)
+
+class DiginGrass(BaseModel):
     user_id: str
     name: str
     description: str
 
-
-class ResponseModal(BaseModel): # 반환할 모델 굳이 안해줘도 되는데 있으면 좋음(원래는 다른 파일에 다 모아놓고 import로 가저다 씀)
+class ResponseModal(BaseModel):
     id: str
 
+class RequestToken(BaseModel):
+    id_token: str
+
 @app.get("/")
-async def root() -> JSONResponse: # 반환타입
-    return JSONResponse({"message": "Hello World"}) # dict반환 말고 JSONResponse를 써야함
+async def root() -> JSONResponse:
+    return JSONResponse({"message": "Hello World"})
 
+# Google 로그인 라우터
+@app.get("/login")
+async def login(request: Request, google=Depends(google_oauth.create_client)):
+    return await google.authorize_redirect(request, redirect_uri="your_redirect_uri")
 
-@app.get("/{grass_id}", response_model=DiginGrass) # 반환하는 모델
-"""
-자세한건 https://fastapi.tiangolo.com/tutorial/response-model/#response_model-parameter 참고하면 돼고 반환 타입은 좀 이상하게 돼있으니까 그거만 참고 하지 마셈 
-"""
+@app.get("/token")
+async def token(request: Request, google=Depends(google_oauth.create_client)):
+    token = await google.authorize_access_token(request)
+    user = await google.parse_id_token(request, token)
+    return {"token_type": "bearer", "access_token": token["access_token"], "user": user}
+
+# 리다이렉트 URI 처리를 위한 라우터
+@app.get("/redirect_uri")
+async def redirect_uri(request: Request, code: str):
+    return {"code": code}
+
+@app.get("/{grass_id}", response_model=DiginGrass)
 async def get_DigIn(grass_id: str) -> JSONResponse:
-    return JSONResponse({
-        "id": grass_id
-    })
+    return JSONResponse({"id": grass_id})
 
 @app.post("/{grass_id}")
 async def post_DigIn(item: DiginGrass) -> JSONResponse:
@@ -61,4 +112,4 @@ async def get_grass(user_id: str) -> JSONResponse:
 
 @app.post("/{grass_id}/fill")
 async def fill_grass(grass_id: str) -> JSONResponse:
-    return JSONResponse({"grass_id": grass_id, "count": int}) # 여기 int뭐하는거임? todo인가
+    return JSONResponse({"grass_id": grass_id, "count": int})
