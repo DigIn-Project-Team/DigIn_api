@@ -1,17 +1,19 @@
 import uuid
 from fastapi import FastAPI, Depends, HTTPException, Request
 from pydantic import BaseModel
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, RedirectResponse
 from starlette.status import HTTP_204_NO_CONTENT
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2AuthorizationCodeBearer
-from fastapi.openapi.models import OAuthFlows, OAuthFlowAuthorizationCode
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.config import Config
 from authlib.integrations.starlette_client import OAuth
-from fastapi.responses import RedirectResponse
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = FastAPI()
 
-# CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -23,38 +25,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load Google client ID and secret from environment variables
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-
-# Google OAuth 설정
-google_oauth = OAuth()
-google_oauth.register(
-    name='google',
-    client_id=GOOGLE_CLIENT_ID,
-    client_secret=GOOGLE_CLIENT_SECRET,
-    authorize_url='https://accounts.google.com/o/oauth2/auth',
-    authorize_params=None,
-    authorize_kwargs=None,
-    token_url='https://accounts.google.com/o/oauth2/token',
-    token_params=None,
-    client_kwargs={'scope': 'openid profile email'},
+# Add SessionMiddleware
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SECRET_KEY", "supersecretkey"),
 )
 
-# Google 로그인을 위한 보안 설정
-oauth2_scheme_google = OAuth2AuthorizationCodeBearer(
-    authorizationUrl='login',
-    tokenUrl='token',
-    flows=OAuthFlows(
-        authorizationCode=OAuthFlowAuthorizationCode(
-            authorizationUrl='login',
-            tokenUrl='token',
-        )
-    )
+# Load OAuth configuration from environment variables
+config = Config('.env')
+oauth = OAuth(config)
+oauth.register(
+    name='google',
+    client_id=os.getenv('GOOGLE_CLIENT_ID'),
+    client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    authorize_params=None,
+    access_token_url='https://accounts.google.com/o/oauth2/token',
+    access_token_params=None,
+    refresh_token_url=None,
+    redirect_uri='http://localhost:8000/auth',
+    client_kwargs={'scope': 'openid profile email'},
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration'
 )
 
 class DiginGrass(BaseModel):
@@ -72,21 +63,16 @@ class RequestToken(BaseModel):
 async def root() -> JSONResponse:
     return JSONResponse({"message": "Hello World"})
 
-# Google 로그인 라우터
-@app.get("/login")
-async def login(request: Request, google=Depends(google_oauth.create_client)):
-    return await google.authorize_redirect(request, redirect_uri="your_redirect_uri")
+@app.get("/auth")
+async def auth(request: Request):
+    token = await oauth.google.authorize_access_token(request)
+    user = await oauth.google.parse_id_token(request, token)
+    return JSONResponse({"token": token, "user": user})
 
-@app.get("/token")
-async def token(request: Request, google=Depends(google_oauth.create_client)):
-    token = await google.authorize_access_token(request)
-    user = await google.parse_id_token(request, token)
-    return {"token_type": "bearer", "access_token": token["access_token"], "user": user}
-
-# 리다이렉트 URI 처리를 위한 라우터
-@app.get("/redirect_uri")
-async def redirect_uri(request: Request, code: str):
-    return {"code": code}
+@app.route('/login')
+async def login(request: Request):
+    redirect_uri = request.url_for('auth')
+    return await oauth.google.authorize_redirect(request, redirect_uri)
 
 @app.get("/{grass_id}", response_model=DiginGrass)
 async def get_DigIn(grass_id: str) -> JSONResponse:
